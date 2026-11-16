@@ -50,6 +50,8 @@ namespace WorldClock
         public string Theme { get; set; }       // light | dark | system
         public string Style { get; set; }       // analog | digital
         public string Unit { get; set; }        // C | F
+        public string Size { get; set; }        // mini | small | normal
+        public int Visible { get; set; }        // cities shown at once (1-3)
         public bool Use24h { get; set; }
         public bool CloseToTray { get; set; }   // what the X button does
         public bool AlwaysOnTop { get; set; }
@@ -102,6 +104,8 @@ namespace WorldClock
             if (s.Theme != "dark" && s.Theme != "system") s.Theme = "light";
             if (s.Style != "digital") s.Style = "analog";
             if (s.Unit != "F") s.Unit = "C";
+            if (s.Size != "mini" && s.Size != "normal") s.Size = "small";
+            if (s.Visible < 1 || s.Visible > 3) s.Visible = 3;
             if (s.Cities == null) s.Cities = new List<CityInfo>();
             s.Cities.RemoveAll(c => c == null || string.IsNullOrEmpty(c.Name) || string.IsNullOrEmpty(c.ZoneId));
             return s;
@@ -113,6 +117,8 @@ namespace WorldClock
             s.Theme = "light";
             s.Style = "analog";
             s.Unit = "C";
+            s.Size = "small";
+            s.Visible = 3;
             s.CloseToTray = true;
             s.Cities = new List<CityInfo>();
             s.Cities.Add(City("Kyiv", "FLE Standard Time", 50.4501, 30.5234, "Ukraine"));

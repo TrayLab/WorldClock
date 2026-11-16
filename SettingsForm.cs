@@ -25,7 +25,7 @@ namespace WorldClock
         Palette pal;
         public AppSettings Result { get; private set; }
 
-        ComboBox cbTheme, cbStyle, cbUnit, cbClose, cbZone;
+        ComboBox cbTheme, cbStyle, cbSize, cbVisible, cbUnit, cbClose, cbZone;
         CheckBox chk24, chkTop, chkStartup;
         ListBox lbCities, lbResults;
         TextBox tbSearch, tbName;
@@ -53,19 +53,25 @@ namespace WorldClock
             // ---------------- appearance
             Header("Appearance", 16);
             Muted("Theme", 16, 52);
-            cbTheme = Combo(170, 48, 200, "Light", "Dark", "Same as Windows");
-            Muted("Clock style", 16, 84);
-            cbStyle = Combo(170, 80, 200, "Analog", "Digital");
+            cbTheme = Combo(110, 48, 150, "Light", "Dark", "Same as Windows");
+            Muted("Clock style", 290, 52);
+            cbStyle = Combo(394, 48, 150, "Analog", "Digital");
+            Muted("Size", 16, 84);
+            cbSize = Combo(110, 80, 150, "Very small", "Small", "Normal");
+            Muted("Cities shown", 290, 84);
+            cbVisible = Combo(394, 80, 150, "1 at a time", "2 at a time", "3 at a time");
             Muted("Temperature", 16, 116);
-            cbUnit = Combo(170, 112, 200, "Celsius (°C)", "Fahrenheit (°F)");
-            Muted("Close button (×)", 16, 148);
-            cbClose = Combo(170, 144, 200, "Minimize to tray", "Exit the app");
-            chk24 = Check("24-hour time", 16, 180);
-            chkTop = Check("Always on top", 170, 180);
-            chkStartup = Check("Start with Windows", 330, 180);
+            cbUnit = Combo(110, 112, 150, "Celsius (\u00B0C)", "Fahrenheit (\u00B0F)");
+            Muted("Close (\u00D7)", 290, 116);
+            cbClose = Combo(394, 112, 150, "Minimize to tray", "Exit the app");
+            chk24 = Check("24-hour time", 16, 156);
+            chkTop = Check("Always on top", 170, 156);
+            chkStartup = Check("Start with Windows", 330, 156);
 
             cbTheme.SelectedIndex = Math.Max(0, Array.IndexOf(ThemeKeys, work.Theme));
             cbStyle.SelectedIndex = work.Digital ? 1 : 0;
+            cbSize.SelectedIndex = work.Size == "mini" ? 0 : work.Size == "normal" ? 2 : 1;
+            cbVisible.SelectedIndex = work.Visible - 1;
             cbUnit.SelectedIndex = work.Unit == "F" ? 1 : 0;
             cbClose.SelectedIndex = work.CloseToTray ? 0 : 1;
             chk24.Checked = work.Use24h;
@@ -73,51 +79,51 @@ namespace WorldClock
             chkStartup.Checked = Store.StartsWithWindows;
             cbTheme.SelectedIndexChanged += delegate { pal = Palette.For(ThemeKeys[cbTheme.SelectedIndex]); ApplyTheme(); };
 
-            Separator(214);
+            Separator(190);
 
             // ---------------- cities
-            Header("Your cities", 226);
+            Header("Your cities", 202);
             lbCities = new ListBox();
-            lbCities.SetBounds(16, 258, 382, 136);
+            lbCities.SetBounds(16, 234, 382, 136);
             lbCities.IntegralHeight = false;
             lbCities.BorderStyle = BorderStyle.FixedSingle;
             Controls.Add(lbCities);
-            btnUp = Btn("Move up", 410, 258, 134, delegate { MoveCity(-1); });
-            btnDown = Btn("Move down", 410, 292, 134, delegate { MoveCity(1); });
-            btnRemove = Btn("Remove", 410, 326, 134, delegate { RemoveCity(); });
+            btnUp = Btn("Move up", 410, 234, 134, delegate { MoveCity(-1); });
+            btnDown = Btn("Move down", 410, 268, 134, delegate { MoveCity(1); });
+            btnRemove = Btn("Remove", 410, 302, 134, delegate { RemoveCity(); });
             lbCities.SelectedIndexChanged += delegate { CitySelected(); };
 
-            Separator(410);
+            Separator(386);
 
             // ---------------- add / edit
-            Header("Add or edit a city", 422);
+            Header("Add or edit a city", 398);
             tbSearch = new TextBox();
-            tbSearch.SetBounds(16, 456, 382, 26);
+            tbSearch.SetBounds(16, 432, 382, 26);
             Controls.Add(tbSearch);
             tbSearch.KeyDown += delegate(object s, KeyEventArgs e)
             {
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoSearch(); }
             };
-            btnSearch = Btn("Search", 410, 455, 134, delegate { DoSearch(); });
+            btnSearch = Btn("Search", 410, 431, 134, delegate { DoSearch(); });
 
             lbResults = new ListBox();
-            lbResults.SetBounds(16, 490, 528, 92);
+            lbResults.SetBounds(16, 466, 528, 92);
             lbResults.IntegralHeight = false;
             lbResults.BorderStyle = BorderStyle.FixedSingle;
             Controls.Add(lbResults);
             lbResults.SelectedIndexChanged += delegate { ResultSelected(); };
 
-            Muted("Name", 16, 596);
+            Muted("Name", 16, 572);
             tbName = new TextBox();
-            tbName.SetBounds(100, 592, 298, 26);
+            tbName.SetBounds(100, 568, 298, 26);
             Controls.Add(tbName);
-            btnAdd = Btn("Add as new city", 410, 591, 134, delegate { AddCity(); });
+            btnAdd = Btn("Add as new city", 410, 567, 134, delegate { AddCity(); });
 
-            Muted("Time zone", 16, 628);
+            Muted("Time zone", 16, 604);
             cbZone = new ComboBox();
             cbZone.DropDownStyle = ComboBoxStyle.DropDownList;
             cbZone.FlatStyle = FlatStyle.Flat;
-            cbZone.SetBounds(100, 624, 298, 26);
+            cbZone.SetBounds(100, 600, 298, 26);
             cbZone.DropDownWidth = 470;
             cbZone.MaxDropDownItems = 20;
             foreach (TimeZoneInfo z in TimeZoneInfo.GetSystemTimeZones())
@@ -127,17 +133,17 @@ namespace WorldClock
                 cbZone.Items.Add(zi);
             }
             Controls.Add(cbZone);
-            btnUpdate = Btn("Update selected", 410, 623, 134, delegate { UpdateCity(); });
+            btnUpdate = Btn("Update selected", 410, 599, 134, delegate { UpdateCity(); });
 
-            lblStatus = Muted("Type a city and press Search. Weather needs a city picked from the search results.", 16, 658);
+            lblStatus = Muted("Type a city and press Search. Weather needs a city picked from the search results.", 16, 610);
             lblStatus.AutoSize = false;
-            lblStatus.SetBounds(16, 658, 528, 18);
+            lblStatus.SetBounds(16, 634, 528, 18);
 
-            btnSave = Btn("Save", 352, 680, 92, delegate { Save(); });
+            btnSave = Btn("Save", 352, 656, 92, delegate { Save(); });
             btnSave.Tag = "primary";
-            btnCancel = Btn("Cancel", 452, 680, 92, delegate { DialogResult = DialogResult.Cancel; Close(); });
+            btnCancel = Btn("Cancel", 452, 656, 92, delegate { DialogResult = DialogResult.Cancel; Close(); });
             CancelButton = btnCancel;
-            ClientSize = new Size(560, 716);
+            ClientSize = new Size(560, 692);
 
             RefreshCities(cities.Count > 0 ? 0 : -1);
             ApplyTheme();
@@ -419,6 +425,8 @@ namespace WorldClock
             if (cities.Count == 0) { Status("Add at least one city."); return; }
             work.Theme = ThemeKeys[Math.Max(0, cbTheme.SelectedIndex)];
             work.Style = cbStyle.SelectedIndex == 1 ? "digital" : "analog";
+            work.Size = cbSize.SelectedIndex == 0 ? "mini" : cbSize.SelectedIndex == 2 ? "normal" : "small";
+            work.Visible = cbVisible.SelectedIndex + 1;
             work.Unit = cbUnit.SelectedIndex == 1 ? "F" : "C";
             work.CloseToTray = cbClose.SelectedIndex != 1;
             work.Use24h = chk24.Checked;

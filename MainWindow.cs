@@ -9,41 +9,58 @@ using System.Windows.Forms;
 
 namespace WorldClock
 {
+    // Compact strip: one row of cities (up to 3 visible, small arrows to scroll the rest).
+    // Clicking a city grows its card to fill the strip; the others slide away.
     class MainWindow : Form
     {
         [DllImport("user32.dll")] static extern bool ReleaseCapture();
         [DllImport("user32.dll")] static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr h, int attr, ref int value, int size);
+        [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint ms);
+        [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint ms);
 
         readonly TrayContext app;
         AppSettings settings;
         Palette pal;
         protected readonly float S;
 
-        // layout in unscaled pixels
-        const float HeaderH = 46, Pad = 14, CardW = 240, CardH = 150, Gap = 12, MinCW = 492, MinCH = 312;
-        float cw, ch;
-        readonly List<RectangleF> cards = new List<RectangleF>();   // content coordinates, scaled
+        // ------------------------------------------------------------ layout
+        struct Metrics { public float W, H, MinCW, R; }
+        Metrics m;
+        const float HeaderH = 26, Pad = 8, Gap = 8, GutterW = 18;
+        float gutter, cw, ch, rowX;
+        int visible;
+        bool Paging { get { return settings.Cities.Count > visible; } }
+        int MaxScroll { get { return Math.Max(0, settings.Cities.Count - visible); } }
+        string Size3 { get { return settings.Size; } }
 
-        // view state
-        int view;            // 0 = all clocks, 1 = one clock large
+        // ------------------------------------------------------------ state
+        int view;                 // 0 = row, 1 = one city enlarged
         int selected = -1;
-        int hoverCard = -1, hoverBtn = -1, pressBtn = -1;
+        int hoverCard = -1, hoverBtn = -1, hoverArrow = 0, pressBtn = -1;
+        Point downPt;
+        bool mouseDown;
 
-        // transition
+        float scroll;             // index of first visible city (animated)
+        float scrollFrom;
+        int scrollTo;
+        bool scrolling;
+        readonly Stopwatch scrollSw = new Stopwatch();
+        const double ScrollMs = 260;
+
         bool animating, expanding;
         readonly Stopwatch animSw = new Stopwatch();
-        Bitmap snapGrid, snapLarge;
+        Bitmap snapOthers, snapCard, snapLarge;
         RectangleF fromRect;
-        const double AnimMs = 380;
+        const double AnimMs = 330;
 
-        // repaint bookkeeping
         readonly List<RectangleF> iconRects = new List<RectangleF>();
         bool recording;
         readonly System.Windows.Forms.Timer frame = new System.Windows.Forms.Timer();
         readonly System.Windows.Forms.Timer wxTimer = new System.Windows.Forms.Timer();
         int lastSecond = -1;
+        bool fast, hiRes;
 
         bool dwmRounded, positioned;
         public bool AllowClose;
@@ -51,6 +68,7 @@ namespace WorldClock
 
         const int BtnBack = 0, BtnGear = 1, BtnMin = 2, BtnClose = 3;
         readonly RectangleF[] btn = new RectangleF[4];
+        RectangleF arrowL, arrowR;
 
         public MainWindow(AppSettings s, TrayContext app)
         {
@@ -81,7 +99,7 @@ namespace WorldClock
             {
                 CreateParams cp = base.CreateParams;
                 cp.ClassStyle |= 0x00020000;          // CS_DROPSHADOW
-                cp.Style |= 0x00020000 | 0x00080000;  // WS_MINIMIZEBOX | WS_SYSMENU (taskbar click minimizes)
+                cp.Style |= 0x00020000 | 0x00080000;  // WS_MINIMIZEBOX | WS_SYSMENU
                 return cp;
             }
         }
@@ -97,14 +115,14 @@ namespace WorldClock
             try
             {
                 int round = 2;
-                dwmRounded = DwmSetWindowAttribute(Handle, 33, ref round, 4) == 0;   // Windows 11 rounded corners
+                dwmRounded = DwmSetWindowAttribute(Handle, 33, ref round, 4) == 0;
                 int border = pal.Border.R | (pal.Border.G << 8) | (pal.Border.B << 16);
-                DwmSetWindowAttribute(Handle, 34, ref border, 4);                     // border colour
+                DwmSetWindowAttribute(Handle, 34, ref border, 4);
             }
             catch { dwmRounded = false; }
         }
 
-        // ================================================================ settings
+        // ============================================================ settings
         public AppSettings Settings { get { return settings; } }
 
         public void ApplySettings(AppSettings s)
@@ -121,8 +139,9 @@ namespace WorldClock
             BackColor = pal.Bg;
             TopMost = s.AlwaysOnTop;
             if (animating) { animating = false; DisposeSnaps(); }
-            if (view == 1 && selected >= settings.Cities.Count) view = 0;
-            if (view == 0) selected = -1;
+            scrolling = false;
+            view = 0;
+            selected = -1;
             hoverCard = -1;
             ComputeLayout();
             if (IsHandleCreated) ApplyDwm();
@@ -138,36 +157,53 @@ namespace WorldClock
             });
         }
 
+        static Metrics Mk(float w, float h, float minCw, float r)
+        {
+            var x = new Metrics();
+            x.W = w; x.H = h; x.MinCW = minCw; x.R = r;
+            return x;
+        }
+
         void ComputeLayout()
         {
+            if (settings.Digital)
+                m = Size3 == "mini" ? Mk(104, 60, 210, 12) : Size3 == "normal" ? Mk(138, 106, 270, 16) : Mk(116, 82, 236, 14);
+            else
+                m = Size3 == "mini" ? Mk(84, 106, 236, 12) : Size3 == "normal" ? Mk(122, 182, 310, 16) : Mk(98, 140, 260, 14);
+
             int n = settings.Cities.Count;
-            int cols = n <= 2 ? Math.Max(1, n) : n <= 4 ? 2 : n <= 9 ? 3 : 4;
-            int rows = (n + cols - 1) / cols;
-            float gw = cols * CardW + (cols - 1) * Gap, gh = rows * CardH + (rows - 1) * Gap;
-            cw = Math.Max(gw, MinCW);
-            ch = Math.Max(gh, MinCH);
-            cards.Clear();
-            float y0 = (ch - gh) / 2f;
-            for (int i = 0; i < n; i++)
-            {
-                int r = i / cols, c = i % cols;
-                int inRow = Math.Min(cols, n - r * cols);
-                float rowW = inRow * CardW + (inRow - 1) * Gap;
-                float x0 = (cw - rowW) / 2f;
-                cards.Add(new RectangleF((x0 + c * (CardW + Gap)) * S, (y0 + r * (CardH + Gap)) * S, CardW * S, CardH * S));
-            }
-            var size = new Size((int)Math.Ceiling((cw + 2 * Pad) * S), (int)Math.Ceiling((HeaderH + ch + Pad) * S));
+            visible = Math.Min(Math.Max(1, settings.Visible), n);
+            gutter = Paging ? GutterW : 0;
+            float rowW = visible * m.W + (visible - 1) * Gap;
+            cw = Math.Max(rowW, m.MinCW);
+            ch = m.H;
+            rowX = (cw - rowW) / 2f;
+            scrollTo = Math.Min(Math.Max(0, scrollTo), MaxScroll);
+            scroll = scrollTo;
+
+            var size = new Size((int)Math.Ceiling((cw + 2 * (Pad + gutter)) * S), (int)Math.Ceiling((HeaderH + ch + Pad) * S));
             if (Size != size) Size = size;
 
-            float bw = 42 * S, bh = 32 * S, by = 7 * S;
-            btn[BtnClose] = new RectangleF(Width - 8 * S - bw, by, bw, bh);
+            float bw = 26 * S, bh = 20 * S, by = 3 * S;
+            btn[BtnClose] = new RectangleF(Width - 4 * S - bw, by, bw, bh);
             btn[BtnMin] = new RectangleF(btn[BtnClose].X - bw, by, bw, bh);
             btn[BtnGear] = new RectangleF(btn[BtnMin].X - bw, by, bw, bh);
-            btn[BtnBack] = new RectangleF(8 * S, by, 36 * S, bh);
+            btn[BtnBack] = new RectangleF(4 * S, by, 24 * S, bh);
+            arrowL = new RectangleF(Pad * S - 4 * S, HeaderH * S, gutter * S + 2 * S, ch * S);
+            arrowR = new RectangleF(Width - (Pad + gutter) * S + 2 * S, HeaderH * S, gutter * S + 2 * S, ch * S);
             if (positioned) ClampToScreen();
         }
 
-        // ============================================================ show / hide
+        float OX { get { return (Pad + gutter) * S; } }
+        float OY { get { return HeaderH * S; } }
+        RectangleF Full { get { return new RectangleF(0, 0, cw * S, ch * S); } }
+
+        RectangleF CardRect(int i)
+        {
+            return new RectangleF((rowX + (i - scroll) * (m.W + Gap)) * S, 0, m.W * S, m.H * S);
+        }
+
+        // ========================================================= show / hide
         public void ShowFromTray()
         {
             if (!positioned) { PlaceInitial(); positioned = true; }
@@ -186,19 +222,24 @@ namespace WorldClock
             SavePosition();
             Hide();
             frame.Stop();
+            SetFast(false);
         }
 
         void PlaceInitial()
         {
             if (settings.HasPos)
             {
-                var r = new Rectangle(settings.WinX, settings.WinY, Width, Height);
                 foreach (Screen sc in Screen.AllScreens)
-                    if (sc.WorkingArea.Contains(new Point(r.X + 40, r.Y + 20))) { Location = r.Location; ClampToScreen(); return; }
+                    if (sc.WorkingArea.Contains(new Point(settings.WinX + 40, settings.WinY + 10)))
+                    {
+                        Location = new Point(settings.WinX, settings.WinY);
+                        ClampToScreen();
+                        return;
+                    }
             }
             Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-            int m = (int)(16 * S);
-            Location = new Point(wa.Right - Width - m, wa.Bottom - Height - m);
+            int mg = (int)(16 * S);
+            Location = new Point(wa.Right - Width - mg, wa.Bottom - Height - mg);
         }
 
         void ClampToScreen()
@@ -223,15 +264,15 @@ namespace WorldClock
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (WindowState == FormWindowState.Minimized)   // minimized from the taskbar -> go to tray
-                BeginInvoke(new MethodInvoker(delegate { Hide(); frame.Stop(); WindowState = FormWindowState.Normal; }));
+            if (WindowState == FormWindowState.Minimized)
+                BeginInvoke(new MethodInvoker(delegate { Hide(); frame.Stop(); SetFast(false); WindowState = FormWindowState.Normal; }));
         }
 
         protected override void OnDeactivate(EventArgs e)
         {
             base.OnDeactivate(e);
             LastDeactivated = Environment.TickCount;
-            if (hoverBtn != -1 || hoverCard != -1) { hoverBtn = hoverCard = -1; Invalidate(); }
+            ClearHover();
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -243,6 +284,7 @@ namespace WorldClock
                 return;
             }
             SavePosition();
+            SetFast(false);
             base.OnFormClosing(e);
         }
 
@@ -252,31 +294,86 @@ namespace WorldClock
             else if (app != null) app.ExitApp();
         }
 
-        // ================================================================= frame
+        // ============================================================== frames
+        // ~60 fps while something moves, otherwise once a second (+ weather icons at 25 fps)
+        void SetFast(bool on)
+        {
+            if (on == fast) return;
+            fast = on;
+            frame.Interval = on ? 15 : 40;
+            try
+            {
+                if (on && !hiRes) { timeBeginPeriod(1); hiRes = true; }
+                if (!on && hiRes) { timeEndPeriod(1); hiRes = false; }
+            }
+            catch { }
+        }
+
         void OnFrame()
         {
             if (!Visible) return;
+            bool moving = false;
+            if (scrolling)
+            {
+                double t = Math.Min(1.0, scrollSw.Elapsed.TotalMilliseconds / ScrollMs);
+                scroll = scrollFrom + (scrollTo - scrollFrom) * EaseOut(t);
+                if (t >= 1) { scroll = scrollTo; scrolling = false; }
+                moving = true;
+            }
             if (animating)
             {
                 if (animSw.Elapsed.TotalMilliseconds >= AnimMs) FinishAnim();
+                moving = true;
+            }
+            if (moving || fast)
+            {
                 Invalidate();
+                Update();
+                if (!scrolling && !animating) SetFast(false);
                 return;
             }
             int sec = DateTime.Now.Second;
             if (sec != lastSecond) { lastSecond = sec; Invalidate(); return; }
             foreach (RectangleF r in iconRects)
-                Invalidate(Rectangle.Round(RectangleF.Inflate(r, 4 * S, 4 * S)));
+                Invalidate(Rectangle.Round(RectangleF.Inflate(r, 3 * S, 3 * S)));
         }
 
-        // =========================================================== transitions
+        static float EaseOut(double p) { return (float)(1 - Math.Pow(1 - p, 3)); }
+        static float EaseInOut(double p) { return (float)(p < 0.5 ? 4 * p * p * p : 1 - Math.Pow(-2 * p + 2, 3) / 2); }
+        static float Clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+        static RectangleF Lerp(RectangleF a, RectangleF b, float k)
+        {
+            return new RectangleF(a.X + (b.X - a.X) * k, a.Y + (b.Y - a.Y) * k,
+                                  a.Width + (b.Width - a.Width) * k, a.Height + (b.Height - a.Height) * k);
+        }
+
+        // ============================================================= scroll
+        void ScrollBy(int dir)
+        {
+            if (animating || view != 0) return;
+            int target = Math.Min(MaxScroll, Math.Max(0, scrollTo + dir));
+            if (target == scrollTo) return;
+            scrollFrom = scroll;
+            scrollTo = target;
+            scrollSw.Reset();
+            scrollSw.Start();
+            scrolling = true;
+            hoverCard = -1;
+            SetFast(true);
+            if (!frame.Enabled) frame.Start();
+        }
+
+        // ========================================================= transitions
         void Expand(int idx)
         {
-            if (animating) return;
+            if (animating || scrolling) return;
             hoverCard = -1;
-            snapGrid = Snap(false);
             selected = idx;
-            snapLarge = Snap(true);
-            fromRect = cards[idx];
+            fromRect = CardRect(idx);
+            snapOthers = SnapRow(idx);
+            snapCard = SnapCard(idx);
+            snapLarge = SnapLarge(idx);
             expanding = true;
             view = 1;
             BeginAnim();
@@ -284,10 +381,15 @@ namespace WorldClock
 
         void Collapse()
         {
-            if (animating || view != 1) return;
-            snapLarge = Snap(true);
-            snapGrid = Snap(false);
-            fromRect = cards[selected];
+            if (animating || view != 1 || selected < 0) return;
+            // make sure the city we return to is on screen
+            if (selected < scrollTo || selected >= scrollTo + visible)
+                scrollTo = Math.Min(MaxScroll, Math.Max(0, selected - (visible - 1) / 2));
+            scroll = scrollTo;
+            fromRect = CardRect(selected);
+            snapOthers = SnapRow(selected);
+            snapCard = SnapCard(selected);
+            snapLarge = SnapLarge(selected);
             expanding = false;
             view = 0;
             BeginAnim();
@@ -300,6 +402,7 @@ namespace WorldClock
             Cursor = Cursors.Default;
             animSw.Reset();
             animSw.Start();
+            SetFast(true);
             if (!frame.Enabled) frame.Start();
             Invalidate();
         }
@@ -314,93 +417,137 @@ namespace WorldClock
 
         void DisposeSnaps()
         {
-            if (snapGrid != null) { snapGrid.Dispose(); snapGrid = null; }
+            if (snapOthers != null) { snapOthers.Dispose(); snapOthers = null; }
+            if (snapCard != null) { snapCard.Dispose(); snapCard = null; }
             if (snapLarge != null) { snapLarge.Dispose(); snapLarge = null; }
         }
 
-        Bitmap Snap(bool large)
+        Bitmap NewSnap(float w, float h, out Graphics g)
         {
-            var b = new Bitmap(Math.Max(1, (int)Math.Ceiling(cw * S)), Math.Max(1, (int)Math.Ceiling(ch * S)), PixelFormat.Format32bppPArgb);
-            using (Graphics g = Graphics.FromImage(b))
-            {
-                Painter.Prep(g);
-                g.Clear(pal.Bg);
-                bool rec = recording;
-                recording = false;
-                if (large) RenderLarge(g, selected);
-                else RenderGrid(g, false, new RectangleF(0, 0, b.Width, b.Height));
-                recording = rec;
-            }
+            var b = new Bitmap(Math.Max(1, (int)Math.Ceiling(w)), Math.Max(1, (int)Math.Ceiling(h)), PixelFormat.Format32bppPArgb);
+            g = Graphics.FromImage(b);
+            Painter.Prep(g);
+            g.Clear(Color.Transparent);
             return b;
         }
 
-        static float Ease(double p) { return (float)(p < 0.5 ? 4 * p * p * p : 1 - Math.Pow(-2 * p + 2, 3) / 2); }
-
-        static RectangleF Lerp(RectangleF a, RectangleF b, float k)
+        Bitmap SnapRow(int skip)
         {
-            return new RectangleF(a.X + (b.X - a.X) * k, a.Y + (b.Y - a.Y) * k,
-                                  a.Width + (b.Width - a.Width) * k, a.Height + (b.Height - a.Height) * k);
+            Graphics g;
+            Bitmap b = NewSnap(cw * S, ch * S, out g);
+            using (g) RenderRow(g, false, Full, skip);
+            return b;
         }
 
+        Bitmap SnapCard(int idx)
+        {
+            Graphics g;
+            Bitmap b = NewSnap(m.W * S, m.H * S, out g);
+            using (g) CardContent(g, settings.Cities[idx], new RectangleF(0, 0, m.W * S, m.H * S), pal.Card, DateTime.UtcNow);
+            return b;
+        }
+
+        Bitmap SnapLarge(int idx)
+        {
+            Graphics g;
+            Bitmap b = NewSnap(cw * S, ch * S, out g);
+            using (g) LargeContent(g, idx);
+            return b;
+        }
+
+        // The chosen card's background grows to fill the strip, its small content fades out,
+        // the enlarged content fades in, and the other cards fade while sliding outward.
         void DrawTransition(Graphics g, float ox, float oy)
         {
-            if (snapGrid == null || snapLarge == null) return;
-            GraphicsState st = g.Save();
-            g.SetClip(new RectangleF(ox, oy, cw * S, ch * S));
+            if (snapOthers == null || snapCard == null || snapLarge == null) return;
             double p = Math.Min(1.0, animSw.Elapsed.TotalMilliseconds / AnimMs);
-            float k = Ease(p);
-            if (!expanding) k = 1 - k;   // k: 0 = grid, 1 = large
-            var full = new RectangleF(0, 0, cw * S, ch * S);
+            float e = EaseInOut(p);
+            float k = expanding ? e : 1 - e;
+            RectangleF full = Full;
+            RectangleF morph = Lerp(fromRect, full, k);
+            g.InterpolationMode = InterpolationMode.NearestNeighbor;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
 
-            // the other clocks fade out and drift away from the chosen one
-            float grow = 1 + 0.08f * k;
-            float fcx = fromRect.X + fromRect.Width / 2, fcy = fromRect.Y + fromRect.Height / 2;
-            var gridDst = new RectangleF(fcx - fcx * grow, fcy - fcy * grow, full.Width * grow, full.Height * grow);
-            g.InterpolationMode = InterpolationMode.Bilinear;
-            gridDst.Offset(ox, oy);
-            DrawImageAlpha(g, snapGrid, gridDst, 1 - k);
+            // other cards: split at the chosen card and push each side outward
+            float aO = Clamp01(1 - k * 1.6f);
+            if (aO > 0)
+            {
+                float split = fromRect.X + fromRect.Width / 2;
+                float shift = 34 * S * k;
+                DrawPart(g, snapOthers, new RectangleF(0, 0, split, full.Height), ox - shift, oy, aO);
+                DrawPart(g, snapOthers, new RectangleF(split, 0, full.Width - split, full.Height), ox + split + shift, oy, aO);
+            }
 
-            // the chosen clock grows from its card to fill the window
-            RectangleF largeDst = Lerp(fromRect, full, k);
-            largeDst.Offset(ox, oy);
-            DrawImageAlpha(g, snapLarge, largeDst, Math.Min(1f, k * 2.4f));
+            var morphW = new RectangleF(morph.X + ox, morph.Y + oy, morph.Width, morph.Height);
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+            Painter.FillRound(g, morphW, m.R * S, pal.Card);
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+
+            GraphicsState st = g.Save();
+            g.SetClip(morphW, CombineMode.Intersect);
+            float aC = Clamp01(1 - k * 2.4f);
+            if (aC > 0)
+            {
+                float frac = full.Width - fromRect.Width > 1 ? Clamp01(fromRect.X / (full.Width - fromRect.Width)) : 0;
+                float cx = morphW.X + (morphW.Width - snapCard.Width) * frac;   // small content stays put while the card grows
+                DrawPart(g, snapCard, new RectangleF(0, 0, snapCard.Width, snapCard.Height), cx, morphW.Y, aC);
+            }
+            float aL = Clamp01((k - 0.32f) / 0.68f);
+            if (aL > 0)
+                DrawPart(g, snapLarge, new RectangleF(0, 0, snapLarge.Width, snapLarge.Height), ox, oy, aL);
             g.Restore(st);
         }
 
-        static void DrawImageAlpha(Graphics g, Image img, RectangleF dst, float alpha)
+        static void DrawPart(Graphics g, Image img, RectangleF src, float x, float y, float alpha)
         {
-            if (alpha <= 0.01f) return;
+            if (alpha <= 0.01f || src.Width <= 0) return;
             using (var ia = new ImageAttributes())
             {
                 var cm = new ColorMatrix();
                 cm.Matrix33 = Math.Min(1f, alpha);
                 ia.SetColorMatrix(cm);
-                PointF[] pts = { dst.Location, new PointF(dst.Right, dst.Top), new PointF(dst.Left, dst.Bottom) };
-                g.DrawImage(img, pts, new RectangleF(0, 0, img.Width, img.Height), GraphicsUnit.Pixel, ia);
+                PointF[] pts = { new PointF(x, y), new PointF(x + src.Width, y), new PointF(x, y + src.Height) };
+                g.DrawImage(img, pts, src, GraphicsUnit.Pixel, ia);
             }
         }
 
-        // =================================================================== paint
+        // =============================================================== paint
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
             Painter.Prep(g);
             g.Clear(pal.Bg);
             bool full = e.ClipRectangle.Contains(ClientRectangle);
-            float ox = Pad * S, oy = HeaderH * S;
+            float ox = OX, oy = OY;
 
             DrawHeader(g);
+            if (Paging && view == 0 && !animating) DrawArrows(g);
 
             if (full) iconRects.Clear();
-            recording = full;
             GraphicsState st = g.Save();
-            g.TranslateTransform(ox, oy);
-            var clip = new RectangleF(e.ClipRectangle.X - ox, e.ClipRectangle.Y - oy, e.ClipRectangle.Width, e.ClipRectangle.Height);
-            if (view == 1 && selected >= 0 && !animating) RenderLarge(g, selected);
-            else if (!animating) RenderGrid(g, true, clip);
+            g.SetClip(new RectangleF(ox, oy, cw * S, ch * S), CombineMode.Intersect);
+            if (animating)
+            {
+                DrawTransition(g, ox, oy);
+            }
+            else
+            {
+                recording = full;
+                g.TranslateTransform(ox, oy);
+                var clip = new RectangleF(e.ClipRectangle.X - ox, e.ClipRectangle.Y - oy, e.ClipRectangle.Width, e.ClipRectangle.Height);
+                if (view == 1 && selected >= 0)
+                {
+                    Painter.FillRound(g, Full, m.R * S, pal.Card);
+                    LargeContent(g, selected);
+                }
+                else
+                {
+                    RenderRow(g, true, clip, -1);
+                    if (scrolling) EdgeFade(g);
+                }
+                recording = false;
+            }
             g.Restore(st);
-            if (animating) DrawTransition(g, ox, oy);
-            recording = false;
 
             if (!dwmRounded)
                 using (var p = new Pen(pal.Border)) g.DrawRectangle(p, 0, 0, Width - 1, Height - 1);
@@ -408,21 +555,20 @@ namespace WorldClock
 
         void AddIcon(RectangleF r)
         {
-            if (recording) iconRects.Add(new RectangleF(r.X + Pad * S, r.Y + HeaderH * S, r.Width, r.Height));
+            if (recording) iconRects.Add(new RectangleF(r.X + OX, r.Y + OY, r.Width, r.Height));
         }
 
         void DrawHeader(Graphics g)
         {
-            bool back = view == 1;
-            float tx = 18 * S;
-            if (back)
+            float tx = 10 * S;
+            if (view == 1)
             {
                 DrawButton(g, BtnBack);
-                tx = btn[BtnBack].Right + 4 * S;
+                tx = btn[BtnBack].Right;
             }
-            string title = back && selected >= 0 ? "All clocks" : "World Clock";
-            using (Font f = Painter.Ui(14 * S, FontStyle.Bold))
-                Painter.Text(g, title, f, back ? pal.Gray : pal.Ink, tx, (HeaderH * S - f.Size * 1.25f) / 2f + 1 * S);
+            string title = view == 1 && selected >= 0 ? settings.Cities[selected].Name : "World Clock";
+            using (Font f = Painter.Ui(11 * S, FontStyle.Bold))
+                Painter.Text(g, title, f, pal.Gray, tx, (HeaderH * S - f.Size * 1.25f) / 2f + 1 * S, btn[BtnGear].X - tx - 4 * S);
             DrawButton(g, BtnGear);
             DrawButton(g, BtnMin);
             DrawButton(g, BtnClose);
@@ -431,44 +577,89 @@ namespace WorldClock
         void DrawButton(Graphics g, int which)
         {
             RectangleF r = btn[which];
-            Color ink = pal.Ink;
+            Color ink = pal.Gray;
             if (hoverBtn == which)
             {
-                if (which == BtnClose) { Painter.FillRound(g, r, 6 * S, Color.FromArgb(232, 17, 35)); ink = Color.White; }
-                else Painter.FillRound(g, r, 6 * S, pal.CardHover);
+                if (which == BtnClose) { Painter.FillRound(g, r, 5 * S, Color.FromArgb(232, 17, 35)); ink = Color.White; }
+                else { Painter.FillRound(g, r, 5 * S, pal.CardHover); ink = pal.Ink; }
             }
             float cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
-            using (var p = new Pen(ink, 1.3f * S))
+            using (var p = new Pen(ink, 1.2f * S))
             {
                 p.StartCap = p.EndCap = LineCap.Round;
                 p.LineJoin = LineJoin.Round;
                 switch (which)
                 {
                     case BtnBack:
-                        g.DrawLines(p, new[] { new PointF(cx + 3 * S, cy - 6 * S), new PointF(cx - 3 * S, cy), new PointF(cx + 3 * S, cy + 6 * S) });
+                        g.DrawLines(p, new[] { new PointF(cx + 2.5f * S, cy - 4.5f * S), new PointF(cx - 2f * S, cy), new PointF(cx + 2.5f * S, cy + 4.5f * S) });
                         break;
                     case BtnMin:
-                        g.DrawLine(p, cx - 5.5f * S, cy, cx + 5.5f * S, cy);
+                        g.DrawLine(p, cx - 4.5f * S, cy, cx + 4.5f * S, cy);
                         break;
                     case BtnClose:
-                        g.DrawLine(p, cx - 5 * S, cy - 5 * S, cx + 5 * S, cy + 5 * S);
-                        g.DrawLine(p, cx + 5 * S, cy - 5 * S, cx - 5 * S, cy + 5 * S);
+                        g.DrawLine(p, cx - 4 * S, cy - 4 * S, cx + 4 * S, cy + 4 * S);
+                        g.DrawLine(p, cx + 4 * S, cy - 4 * S, cx - 4 * S, cy + 4 * S);
                         break;
                     case BtnGear:
-                        using (var tp = new Pen(ink, 2.4f * S))
+                        using (var tp = new Pen(ink, 1.9f * S))
                             for (int i = 0; i < 8; i++)
                             {
                                 double a = i * Math.PI / 4;
                                 float ca = (float)Math.Cos(a), sa = (float)Math.Sin(a);
-                                g.DrawLine(tp, cx + ca * 4.5f * S, cy + sa * 4.5f * S, cx + ca * 7.2f * S, cy + sa * 7.2f * S);
+                                g.DrawLine(tp, cx + ca * 3.6f * S, cy + sa * 3.6f * S, cx + ca * 5.6f * S, cy + sa * 5.6f * S);
                             }
-                        g.DrawEllipse(p, cx - 5 * S, cy - 5 * S, 10 * S, 10 * S);
                         Color hole = hoverBtn == which ? pal.CardHover : pal.Bg;
-                        using (var b = new SolidBrush(hole)) g.FillEllipse(b, cx - 4.3f * S, cy - 4.3f * S, 8.6f * S, 8.6f * S);
-                        g.DrawEllipse(p, cx - 2.2f * S, cy - 2.2f * S, 4.4f * S, 4.4f * S);
+                        using (var b = new SolidBrush(ink)) g.FillEllipse(b, cx - 4.2f * S, cy - 4.2f * S, 8.4f * S, 8.4f * S);
+                        using (var b = new SolidBrush(hole)) g.FillEllipse(b, cx - 1.8f * S, cy - 1.8f * S, 3.6f * S, 3.6f * S);
                         break;
                 }
             }
+        }
+
+        void DrawArrows(Graphics g)
+        {
+            DrawArrow(g, arrowL, -1, scrollTo > 0);
+            DrawArrow(g, arrowR, 1, scrollTo < MaxScroll);
+        }
+
+        void DrawArrow(Graphics g, RectangleF r, int dir, bool enabled)
+        {
+            float cx = r.X + r.Width / 2, cy = r.Y + r.Height / 2;
+            bool hot = enabled && hoverArrow == dir;
+            if (hot) Painter.FillRound(g, new RectangleF(cx - 8 * S, cy - 13 * S, 16 * S, 26 * S), 6 * S, pal.CardHover);
+            Color c = !enabled ? Color.FromArgb(60, pal.Gray) : hot ? pal.Ink : pal.Gray;
+            using (var p = new Pen(c, 1.5f * S))
+            {
+                p.StartCap = p.EndCap = LineCap.Round;
+                p.LineJoin = LineJoin.Round;
+                float d = 2.5f * S * dir;
+                g.DrawLines(p, new[] { new PointF(cx - d, cy - 5 * S), new PointF(cx + d, cy), new PointF(cx - d, cy + 5 * S) });
+            }
+        }
+
+        // ================================================================ row
+        void RenderRow(Graphics g, bool live, RectangleF clip, int skip)
+        {
+            DateTime utc = DateTime.UtcNow;
+            for (int i = 0; i < settings.Cities.Count; i++)
+            {
+                if (i == skip) continue;
+                RectangleF r = CardRect(i);
+                if (r.Right < 0 || r.X > cw * S || !clip.IntersectsWith(r)) continue;
+                Color bg = (live && i == hoverCard) ? pal.CardHover : pal.Card;
+                Painter.FillRound(g, r, m.R * S, bg);
+                CardContent(g, settings.Cities[i], r, bg, utc);
+            }
+        }
+
+        // soft fade at both ends of the row while it slides
+        void EdgeFade(Graphics g)
+        {
+            float w = 14 * S, H = ch * S, W = cw * S;
+            using (var lb = new LinearGradientBrush(new RectangleF(-1, 0, w + 1, H), pal.Bg, Color.FromArgb(0, pal.Bg), LinearGradientMode.Horizontal))
+                g.FillRectangle(lb, 0, 0, w, H);
+            using (var rb = new LinearGradientBrush(new RectangleF(W - w, 0, w + 1, H), Color.FromArgb(0, pal.Bg), pal.Bg, LinearGradientMode.Horizontal))
+                g.FillRectangle(rb, W - w, 0, w, H);
         }
 
         string TimeShort(DateTime t) { return t.ToString(settings.Use24h ? "HH:mm" : "h:mm tt", Painter.Inv); }
@@ -480,18 +671,62 @@ namespace WorldClock
             suffix = settings.Use24h ? "" : t.ToString("tt", Painter.Inv).ToLowerInvariant();
         }
 
-        // ---------------------------------------------------------------- grid
-        void RenderGrid(Graphics g, bool live, RectangleF clip)
+        static string DayShort(DateTime t)
         {
-            DateTime utc = DateTime.UtcNow;
-            for (int i = 0; i < cards.Count && i < settings.Cities.Count; i++)
+            string d = Painter.DayWord(t);
+            return d == "Today" ? "" : d == "Tomorrow" ? "Tmrw" : d == "Yesterday" ? "Yday" : d;
+        }
+
+        void CardContent(Graphics g, CityInfo c, RectangleF r, Color bg, DateTime utc)
+        {
+            if (settings.Digital) DigitalCard(g, c, r, bg, utc);
+            else AnalogCard(g, c, r, bg, utc);
+        }
+
+        // centred "[icon] 22°  extra" row
+        void WeatherRow(Graphics g, CityInfo c, Color bg, float cx, float y, float iconPx, float tempPx, string extra, float extraPx)
+        {
+            WeatherInfo w = WeatherService.Get(c, settings.Unit);
+            using (Font ft = Painter.Ui(tempPx, FontStyle.Bold))
+            using (Font fx = Painter.Ui(extraPx))
             {
-                RectangleF r = cards[i];
-                if (!clip.IntersectsWith(r)) continue;
-                Color bg = (live && i == hoverCard) ? pal.CardHover : pal.Card;
-                Painter.FillRound(g, r, 20 * S, bg);
-                if (settings.Digital) DigitalCard(g, settings.Cities[i], r, bg, utc);
-                else AnalogCard(g, settings.Cities[i], r, bg, utc);
+                string temp = w != null ? Painter.Temp(w.Temp, settings.Unit, false) : "";
+                if (w == null && string.IsNullOrEmpty(extra)) return;
+                string ex = string.IsNullOrEmpty(extra) ? "" : (w != null ? "  ·  " : "") + extra;
+                float total = (w != null ? iconPx + 3 * S + Painter.Width(g, temp, ft) : 0) + (ex.Length > 0 ? Painter.Width(g, ex, fx) : 0);
+                float x = cx - total / 2;
+                if (w != null)
+                {
+                    var ir = new RectangleF(x, y - iconPx * 0.18f, iconPx, iconPx);
+                    Painter.DrawWeather(g, ir, w, pal, bg);
+                    AddIcon(ir);
+                    x += iconPx + 3 * S;
+                    Painter.Text(g, temp, ft, pal.Ink, x, y);
+                    x += Painter.Width(g, temp, ft);
+                }
+                if (ex.Length > 0) Painter.Text(g, ex, fx, pal.Gray, x, y + (tempPx - extraPx) * 0.55f);
+            }
+        }
+
+        void CenteredText(Graphics g, string s, float px, FontStyle st, Color c, float cx, float y, float maxW)
+        {
+            using (Font f = Painter.Fit(g, s, st, px, px * 0.75f, maxW))
+            {
+                float w = Math.Min(maxW, Painter.Width(g, s, f));
+                Painter.Text(g, s, f, c, cx - w / 2, y, maxW);
+            }
+        }
+
+        void CityName(Graphics g, CityInfo c, float px, FontStyle st, Color col, float cx, float y, float maxW)
+        {
+            bool local = c.IsLocal();
+            using (Font f = Painter.Fit(g, c.Name, st, px, px * 0.75f, maxW - (local ? px : 0)))
+            {
+                float w = Math.Min(maxW, Painter.Width(g, c.Name, f));
+                float arrow = local ? f.Size * 0.6f : 0, gap = local ? f.Size * 0.3f : 0;
+                float x = cx - (w + arrow + gap) / 2;
+                if (local) Painter.LocationArrow(g, x, y + f.Size * 0.33f, arrow, pal.Gray);
+                Painter.Text(g, c.Name, f, col, x + arrow + gap, y, maxW);
             }
         }
 
@@ -499,32 +734,29 @@ namespace WorldClock
         {
             DateTime t = c.TimeAt(utc);
             TimeSpan off = c.OffsetAt(utc);
-            float D = 100 * S;
-            var face = new RectangleF(r.X + 18 * S, r.Y + (r.Height - D) / 2f, D, D);
-            Painter.DrawClock(g, face, t, false, S, pal);
+            float cx = r.X + r.Width / 2, inner = r.Width - 10 * S;
+            string sz = Size3;
+            float D = (sz == "mini" ? 56 : sz == "normal" ? 80 : 62) * S;
+            float y = r.Y + (sz == "normal" ? 12 : 10) * S;
+            Painter.DrawClock(g, new RectangleF(cx - D / 2, y, D, D), t, false, S, pal);
+            y += D + (sz == "normal" ? 9 : 7) * S;
 
-            float tx = face.Right + 16 * S, tw = r.Right - tx - 10 * S, y = r.Y + 20 * S;
-            float nameX = tx;
-            if (c.IsLocal())
-            {
-                Painter.LocationArrow(g, tx, y + 6 * S, 10 * S, pal.Gray);
-                nameX += 14 * S;
-            }
-            using (Font f = Painter.Fit(g, c.Name, FontStyle.Bold, 19 * S, 12 * S, r.Right - nameX - 10 * S))
-                Painter.Text(g, c.Name, f, pal.Ink, nameX, y, r.Right - nameX - 10 * S);
-            using (Font f = Painter.Ui(15 * S))
-                Painter.Text(g, TimeShort(t), f, pal.Ink, tx, y + 31 * S, tw);
-            using (Font f = Painter.Ui(12 * S))
-                Painter.Text(g, Painter.DayWord(t) + ", " + Painter.DiffShort(off, utc), f, pal.Gray, tx, y + 53 * S, tw);
+            float namePx = (sz == "normal" ? 14 : sz == "small" ? 12.5f : 12) * S;
+            CityName(g, c, namePx, FontStyle.Bold, pal.Ink, cx, y, inner);
+            y += namePx * 1.35f;
+            string time = TimeShort(t);
+            string day = DayShort(t);
+            if (sz != "normal" && day.Length > 0) time += " " + day;
+            CenteredText(g, time, (sz == "normal" ? 12.5f : 11) * S, FontStyle.Regular, sz == "normal" ? pal.Ink : pal.Gray, cx, y, inner);
 
-            WeatherInfo w = WeatherService.Get(c, settings.Unit);
-            if (w != null)
+            if (sz == "small")
+                WeatherRow(g, c, bg, cx, y + 19 * S, 16 * S, 11.5f * S, null, 10 * S);
+            else if (sz == "normal")
             {
-                var ir = new RectangleF(tx - 3 * S, y + 76 * S, 30 * S, 30 * S);
-                Painter.DrawWeather(g, ir, w, pal, bg);
-                AddIcon(ir);
-                using (Font f = Painter.Ui(16 * S, FontStyle.Bold))
-                    Painter.Text(g, Painter.Temp(w.Temp, settings.Unit, false), f, pal.Ink, ir.Right + 4 * S, ir.Y + 6 * S);
+                y += 18 * S;
+                string sub = (day.Length > 0 ? day + ", " : "") + Painter.DiffShort(off, utc);
+                CenteredText(g, sub, 10.5f * S, FontStyle.Regular, pal.Gray, cx, y, inner);
+                WeatherRow(g, c, bg, cx, y + 20 * S, 19 * S, 13 * S, null, 10 * S);
             }
         }
 
@@ -532,105 +764,101 @@ namespace WorldClock
         {
             DateTime t = c.TimeAt(utc);
             TimeSpan off = c.OffsetAt(utc);
-            float cx = r.X + r.Width / 2;
-
-            using (Font f = Painter.Fit(g, c.Name, FontStyle.Regular, 16 * S, 11 * S, r.Width - 40 * S))
-                CenteredName(g, c, f, cx, r.Y + 16 * S);
-
+            float cx = r.X + r.Width / 2, inner = r.Width - 12 * S;
+            string sz = Size3;
             string main, suf;
             DigitalParts(t, false, out main, out suf);
-            Painter.DrawDigital(g, cx, r.Y + 42 * S, main, suf, 44 * S, pal.Ink);
 
-            // bottom row: [icon] 22°  ·  Today, -2h
-            WeatherInfo w = WeatherService.Get(c, settings.Unit);
-            string sub = Painter.DayWord(t) + ", " + Painter.DiffShort(off, utc);
-            using (Font ft = Painter.Ui(14 * S, FontStyle.Bold))
-            using (Font fs = Painter.Ui(12 * S))
+            float namePx = (sz == "normal" ? 12.5f : 11) * S;
+            CityName(g, c, namePx, FontStyle.Regular, pal.Gray, cx, r.Y + (sz == "normal" ? 9 : 7) * S, inner);
+            float px = (sz == "mini" ? 25 : sz == "normal" ? 32 : 27) * S;
+            while (px > 12 * S && Painter.DigitalWidth(g, main, suf, px) > inner) px -= 1 * S;
+            Painter.DrawDigital(g, cx, r.Y + (sz == "mini" ? 23 : sz == "normal" ? 28 : 24) * S, main, suf, px, pal.Ink);
+
+            string day = DayShort(t);
+            if (sz == "small")
+                WeatherRow(g, c, bg, cx, r.Y + 60 * S, 15 * S, 11 * S, day.Length > 0 ? day : null, 10 * S);
+            else if (sz == "normal")
+                WeatherRow(g, c, bg, cx, r.Y + 78 * S, 17 * S, 12 * S, (day.Length > 0 ? day + " " : "") + Painter.DiffShort(off, utc), 10.5f * S);
+            else if (day.Length > 0)
             {
-                float iconW = 24 * S;
-                string temp = w != null ? Painter.Temp(w.Temp, settings.Unit, false) : "";
-                string sep = w != null ? "   ·   " : "";
-                float total = (w != null ? iconW + 4 * S + Painter.Width(g, temp, ft) : 0) + Painter.Width(g, sep + sub, fs);
-                float x = cx - total / 2, y = r.Y + 108 * S;
-                if (w != null)
-                {
-                    var ir = new RectangleF(x, y - 3 * S, iconW, iconW);
-                    Painter.DrawWeather(g, ir, w, pal, bg);
-                    AddIcon(ir);
-                    x += iconW + 4 * S;
-                    Painter.Text(g, temp, ft, pal.Ink, x, y);
-                    x += Painter.Width(g, temp, ft);
-                }
-                Painter.Text(g, sep + sub, fs, pal.Gray, x, y + 2 * S);
+                // mini: mark a different day with a tiny tag in the corner
+                using (Font f = Painter.Ui(8.5f * S)) Painter.Text(g, day, f, pal.Gray, r.Right - 6 * S - Painter.Width(g, day, f), r.Y + 5 * S);
             }
         }
 
-        void CenteredName(Graphics g, CityInfo c, Font f, float cx, float y)
-        {
-            float w = Painter.Width(g, c.Name, f);
-            bool local = c.IsLocal();
-            float arrow = f.Size * 0.62f, gap = f.Size * 0.3f;
-            float total = w + (local ? arrow + gap : 0);
-            float x = cx - total / 2;
-            if (local)
-            {
-                Painter.LocationArrow(g, x, y + f.Size * 0.32f, arrow, pal.Gray);
-                x += arrow + gap;
-            }
-            Painter.Text(g, c.Name, f, pal.Gray, x, y);
-        }
-
-        // ---------------------------------------------------------------- large
-        void RenderLarge(Graphics g, int idx)
+        // ============================================================== large
+        void LargeContent(Graphics g, int idx)
         {
             if (idx < 0 || idx >= settings.Cities.Count) return;
-            float W = cw * S, H = ch * S;
-            Painter.FillRound(g, new RectangleF(0, 0, W, H), 24 * S, pal.Card);
             CityInfo c = settings.Cities[idx];
             DateTime utc = DateTime.UtcNow;
-            if (settings.Digital) LargeDigital(g, c, W, H, utc);
-            else LargeAnalog(g, c, W, H, utc);
+            if (settings.Digital) LargeDigital(g, c, cw * S, ch * S, utc);
+            else LargeAnalog(g, c, cw * S, ch * S, utc);
         }
 
         void LargeAnalog(Graphics g, CityInfo c, float W, float H, DateTime utc)
         {
             DateTime t = c.TimeAt(utc);
             TimeSpan off = c.OffsetAt(utc);
-            float D = Math.Min(H - 56 * S, 236 * S);
-            var face = new RectangleF(30 * S, (H - D) / 2f, D, D);
-            Painter.DrawClock(g, face, t, true, S, pal);
+            string sz = Size3;
+            float pad = 9 * S;
+            float D = H - 2 * pad;
+            Painter.DrawClock(g, new RectangleF(pad + 4 * S, pad, D, D), t, sz != "mini", S, pal);
+            float tx = pad + 4 * S + D + 16 * S, tw = W - tx - pad;
+            WeatherInfo w = sz == "mini" ? null : WeatherService.Get(c, settings.Unit);
 
-            float tx = face.Right + 34 * S, tw = W - tx - 22 * S;
-            WeatherInfo w = WeatherService.Get(c, settings.Unit);
-            float y = (H - (w != null ? 226 : 172) * S) / 2f;
+            float f = sz == "normal" ? 1f : sz == "small" ? 0.84f : 0.74f;
+            float gmtPx = 11 * S * f, namePx = 22 * S * f, timePx = 17 * S * f, infoPx = Math.Max(10 * S, 12 * S * f);
+            string day = Painter.DayWord(t);
+            string date = day == "Today" ? t.ToString(sz == "normal" ? "dddd, d MMMM" : "ddd, d MMM", Painter.Inv) : day + ", " + t.ToString("ddd d MMM", Painter.Inv);
 
-            using (Font f = Painter.Ui(16 * S)) Painter.Text(g, Painter.Gmt(off), f, pal.Gray, tx, y, tw);
-            y += 26 * S;
-            float nameX = tx;
-            if (c.IsLocal()) { Painter.LocationArrow(g, tx, y + 13 * S, 15 * S, pal.Gray); nameX += 21 * S; }
-            using (Font f = Painter.Fit(g, c.Name, FontStyle.Bold, 38 * S, 18 * S, W - nameX - 22 * S))
-                Painter.Text(g, c.Name, f, pal.Ink, nameX - 2 * S, y, W - nameX - 22 * S);
-            y += 52 * S;
-            using (Font f = Painter.Ui(25 * S)) Painter.Text(g, TimeLong(t), f, pal.Ink, tx, y, tw);
-            y += 38 * S;
-            using (Font f = Painter.Ui(15 * S))
+            float block = 0;
+            if (sz == "normal") block += gmtPx * 1.5f;
+            block += namePx * 1.3f + timePx * 1.45f + infoPx * 1.45f;
+            if (sz != "mini") block += infoPx * 1.45f;
+            if (w != null) block += 6 * S + infoPx * 2.2f;
+            float y = (H - block) / 2f;
+
+            if (sz == "normal")
             {
-                string day = Painter.DayWord(t);
-                string date = day == "Today" ? t.ToString("dddd, d MMMM", Painter.Inv) : day + ", " + t.ToString("ddd d MMM", Painter.Inv);
-                Painter.Text(g, date, f, pal.Gray, tx, y, tw);
-                y += 22 * S;
-                Painter.Text(g, Painter.DiffLong(off, utc), f, pal.Gray, tx, y, tw);
+                using (Font fo = Painter.Ui(gmtPx)) Painter.Text(g, Painter.Gmt(off), fo, pal.Gray, tx, y, tw);
+                y += gmtPx * 1.5f;
             }
-            y += 36 * S;
+            using (Font fo = Painter.Fit(g, c.Name, FontStyle.Bold, namePx, namePx * 0.6f, tw)) Painter.Text(g, c.Name, fo, pal.Ink, tx - 1 * S, y, tw);
+            y += namePx * 1.3f;
+            using (Font fo = Painter.Ui(timePx)) Painter.Text(g, TimeLong(t), fo, pal.Ink, tx, y, tw);
+            y += timePx * 1.45f;
+            using (Font fo = Painter.Ui(infoPx))
+            {
+                if (sz == "mini")
+                {
+                    Painter.Text(g, date + "  ·  " + Painter.DiffShort(off, utc), fo, pal.Gray, tx, y, tw);
+                    y += infoPx * 1.45f;
+                }
+                else
+                {
+                    Painter.Text(g, date, fo, pal.Gray, tx, y, tw);
+                    y += infoPx * 1.45f;
+                    Painter.Text(g, sz == "normal" ? Painter.DiffLong(off, utc) : Painter.Gmt(off) + "  ·  " + Painter.DiffShort(off, utc), fo, pal.Gray, tx, y, tw);
+                    y += infoPx * 1.45f;
+                }
+            }
             if (w != null)
             {
-                var ir = new RectangleF(tx - 4 * S, y, 48 * S, 48 * S);
+                y += 6 * S;
+                float ip = infoPx * 2.0f;
+                var ir = new RectangleF(tx - 2 * S, y - ip * 0.12f, ip, ip);
                 Painter.DrawWeather(g, ir, w, pal, pal.Card);
                 AddIcon(ir);
-                using (Font f = Painter.Ui(26 * S, FontStyle.Bold))
-                    Painter.Text(g, Painter.Temp(w.Temp, settings.Unit, true), f, pal.Ink, ir.Right + 8 * S, ir.Y - 1 * S);
-                using (Font f = Painter.Ui(14 * S))
-                    Painter.Text(g, WeatherService.Describe(w.Code, w.IsDay), f, pal.Gray, ir.Right + 9 * S, ir.Y + 31 * S, W - ir.Right - 30 * S);
+                float x = ir.Right + 5 * S;
+                using (Font ft = Painter.Ui(infoPx * 1.3f, FontStyle.Bold))
+                {
+                    string temp = Painter.Temp(w.Temp, settings.Unit, true);
+                    Painter.Text(g, temp, ft, pal.Ink, x, y);
+                    x += Painter.Width(g, temp, ft) + 6 * S;
+                }
+                using (Font fo = Painter.Ui(infoPx)) Painter.Text(g, WeatherService.Describe(w.Code, w.IsDay), fo, pal.Gray, x, y + infoPx * 0.3f, W - x - pad);
             }
         }
 
@@ -638,48 +866,34 @@ namespace WorldClock
         {
             DateTime t = c.TimeAt(utc);
             TimeSpan off = c.OffsetAt(utc);
-            WeatherInfo w = WeatherService.Get(c, settings.Unit);
-            float cx = W / 2;
-            float y = (H - (w != null ? 214 : 160) * S) / 2f;
-
-            using (Font f = Painter.Fit(g, c.Name, FontStyle.Regular, 24 * S, 14 * S, W - 60 * S))
-                CenteredName(g, c, f, cx, y);
-            y += 42 * S;
-
+            string sz = Size3;
+            float cx = W / 2, inner = W - 24 * S;
             string main, suf;
             DigitalParts(t, true, out main, out suf);
-            float px = 86 * S;
-            while (px > 30 * S && Painter.DigitalWidth(g, main, suf, px) > W - 56 * S) px -= 2 * S;
-            Painter.DrawDigital(g, cx, y + (86 * S - px) / 2f, main, suf, px, pal.Ink);
-            y += 102 * S;
+            string date = t.ToString("ddd, d MMM", Painter.Inv);
 
-            string line = t.ToString("ddd, d MMM", Painter.Inv) + "   ·   " + Painter.Gmt(off) + "   ·   " + Painter.DiffLong(off, utc);
-            using (Font f = Painter.Ui(15 * S))
-                Painter.Text(g, line, f, pal.Gray, cx - Painter.Width(g, line, f) / 2, y);
-            y += 34 * S;
+            float namePx = (sz == "normal" ? 13 : 11) * S;
+            string head = sz == "mini" ? c.Name + "   ·   " + date + "   ·   " + Painter.DiffShort(off, utc) : c.Name;
+            if (sz == "mini") CenteredText(g, head, namePx, FontStyle.Regular, pal.Gray, cx, 7 * S, inner);
+            else CityName(g, c, namePx, FontStyle.Regular, pal.Gray, cx, 8 * S, inner);
 
-            if (w != null)
+            float maxPx = (sz == "mini" ? 29 : sz == "normal" ? 40 : 32) * S;
+            float px = maxPx;
+            while (px > 12 * S && Painter.DigitalWidth(g, main, suf, px) > inner) px -= 1 * S;
+            float top = (sz == "mini" ? 22 : sz == "normal" ? 26 : 23) * S + (maxPx - px) * 0.5f;
+            Painter.DrawDigital(g, cx, top, main, suf, px, pal.Ink);
+
+            if (sz == "small")
+                WeatherRow(g, c, pal.Card, cx, 60 * S, 15 * S, 11 * S, date + "  ·  " + Painter.Gmt(off) + "  ·  " + Painter.DiffShort(off, utc), 10 * S);
+            else if (sz == "normal")
             {
-                using (Font ft = Painter.Ui(24 * S, FontStyle.Bold))
-                using (Font fc = Painter.Ui(15 * S))
-                {
-                    string temp = Painter.Temp(w.Temp, settings.Unit, true);
-                    string cond = "   " + WeatherService.Describe(w.Code, w.IsDay);
-                    float iw = 40 * S;
-                    float total = iw + 8 * S + Painter.Width(g, temp, ft) + Painter.Width(g, cond, fc);
-                    float x = cx - total / 2;
-                    var ir = new RectangleF(x, y - 4 * S, iw, iw);
-                    Painter.DrawWeather(g, ir, w, pal, pal.Card);
-                    AddIcon(ir);
-                    x += iw + 8 * S;
-                    Painter.Text(g, temp, ft, pal.Ink, x, y);
-                    x += Painter.Width(g, temp, ft);
-                    Painter.Text(g, cond, fc, pal.Gray, x, y + 8 * S);
-                }
+                WeatherInfo w = WeatherService.Get(c, settings.Unit);
+                string ex = (w != null ? WeatherService.Describe(w.Code, w.IsDay) + "  ·  " : "") + date + "  ·  " + Painter.Gmt(off) + "  ·  " + Painter.DiffLong(off, utc);
+                WeatherRow(g, c, pal.Card, cx, 78 * S, 18 * S, 13 * S, ex, 10.5f * S);
             }
         }
 
-        // ================================================================= mouse
+        // ============================================================== mouse
         int HitBtn(Point p)
         {
             for (int i = 0; i < 4; i++)
@@ -690,25 +904,57 @@ namespace WorldClock
             return -1;
         }
 
+        int HitArrow(Point p)
+        {
+            if (!Paging || view != 0 || animating) return 0;
+            if (arrowL.Contains(p)) return -1;
+            if (arrowR.Contains(p)) return 1;
+            return 0;
+        }
+
+        bool InContent(Point p)
+        {
+            return new RectangleF(OX, OY, cw * S, ch * S).Contains(p);
+        }
+
         int HitCard(Point p)
         {
-            if (view != 0 || animating) return -1;
-            var q = new PointF(p.X - Pad * S, p.Y - HeaderH * S);
-            for (int i = 0; i < cards.Count; i++) if (cards[i].Contains(q)) return i;
+            if (view != 0 || animating || scrolling || !InContent(p)) return -1;
+            var q = new PointF(p.X - OX, p.Y - OY);
+            for (int i = 0; i < settings.Cities.Count; i++) if (CardRect(i).Contains(q)) return i;
             return -1;
+        }
+
+        void ClearHover()
+        {
+            if (hoverBtn != -1 || hoverCard != -1 || hoverArrow != 0)
+            {
+                hoverBtn = hoverCard = -1;
+                hoverArrow = 0;
+                Invalidate();
+            }
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (mouseDown && pressBtn < 0 && (Math.Abs(e.X - downPt.X) > 4 || Math.Abs(e.Y - downPt.Y) > 4))
+            {
+                mouseDown = false;     // start dragging the window from anywhere
+                ReleaseCapture();
+                SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero);
+                return;
+            }
             int b = HitBtn(e.Location);
-            int c = b >= 0 ? -1 : HitCard(e.Location);
-            bool overLarge = view == 1 && !animating && e.Y > HeaderH * S;
-            Cursor = (c >= 0 || overLarge || b >= 0) ? Cursors.Hand : Cursors.Default;
-            if (b != hoverBtn || c != hoverCard)
+            int a = b >= 0 ? 0 : HitArrow(e.Location);
+            int c = (b >= 0 || a != 0) ? -1 : HitCard(e.Location);
+            bool overLarge = view == 1 && !animating && InContent(e.Location);
+            Cursor = (b >= 0 || a != 0 || c >= 0 || overLarge) ? Cursors.Hand : Cursors.Default;
+            if (b != hoverBtn || c != hoverCard || a != hoverArrow)
             {
                 hoverBtn = b;
                 hoverCard = c;
+                hoverArrow = a;
                 Invalidate();
             }
         }
@@ -716,7 +962,7 @@ namespace WorldClock
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            if (hoverBtn != -1 || hoverCard != -1) { hoverBtn = hoverCard = -1; Invalidate(); }
+            ClearHover();
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -725,11 +971,10 @@ namespace WorldClock
             if (e.Button != MouseButtons.Left) return;
             int b = HitBtn(e.Location);
             if (b >= 0) { pressBtn = b; return; }
-            if (e.Y < HeaderH * S)
-            {
-                ReleaseCapture();
-                SendMessage(Handle, 0xA1, (IntPtr)2, IntPtr.Zero);   // drag the window by its header
-            }
+            int a = HitArrow(e.Location);
+            if (a != 0) { ScrollBy(a); return; }
+            mouseDown = true;
+            downPt = e.Location;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -749,13 +994,21 @@ namespace WorldClock
                 if (b == pressed) DoButton(b);
                 return;
             }
-            if (e.Y < HeaderH * S || animating) return;
+            if (!mouseDown) return;
+            mouseDown = false;
+            if (animating || !InContent(e.Location)) return;
             if (view == 0)
             {
                 int c = HitCard(e.Location);
                 if (c >= 0) Expand(c);
             }
             else Collapse();
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            if (view == 0) ScrollBy(e.Delta > 0 ? -1 : 1);
         }
 
         void DoButton(int b)
@@ -774,6 +1027,8 @@ namespace WorldClock
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Back) Collapse();
+            else if (e.KeyCode == Keys.Left) ScrollBy(-1);
+            else if (e.KeyCode == Keys.Right) ScrollBy(1);
             base.OnKeyDown(e);
         }
 
@@ -781,6 +1036,7 @@ namespace WorldClock
         {
             if (disposing)
             {
+                SetFast(false);
                 frame.Dispose();
                 wxTimer.Dispose();
                 DisposeSnaps();
