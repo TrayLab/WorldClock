@@ -4,8 +4,7 @@ A tiny, clean world clock for the Windows system tray, with analog or digital fa
 
 Built for people who work across time zones and want to see at a glance what time it is for their team, clients or partners.
 
-<img width="1438" height="613" alt="shot" src="https://github.com/user-attachments/assets/9b96b454-260b-45d0-86ec-46a6013fb222" />
-
+![World Clock preview](docs/preview.png)
 
 ---
 
