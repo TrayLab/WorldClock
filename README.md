@@ -27,7 +27,9 @@ Built for people who work across time zones and want to see at a glance what tim
   - Hover over the icon to see every city's time without opening it.
   - Right-click it for the menu.
 - **Minimize / close to tray**: the window stays open until you minimize or close it. You can choose whether **×** hides to the tray or exits.
-- **Extras**: 24-hour time, Always on top, Start with Windows, remembers the window position.
+- **Minimal window**: hides the top bar (title, ⚙, minimize, close) so only the clocks show, with no taskbar button. Everything is controlled from the right-click menu.
+- **Quick toggles in the tray menu**: Always on top, Minimal window and Start with Windows are one click away.
+- **Extras**: 24-hour time, remembers the window position.
 - **No install, no dependencies**: one small `.exe`, built with the C# compiler that already ships with Windows.
 
 ---
@@ -82,7 +84,11 @@ Manual build:
 | Scroll cities | **‹ ›** arrows, mouse wheel, or `←` `→` |
 | Move the window | Drag it from anywhere |
 | Settings | ⚙ in the top bar, or right-click the tray icon → *Settings…* |
+| Toggle Always on top / Minimal window / Start with Windows | Right-click the tray icon |
+| Hide the window (minimal mode) | Right-click the tray icon → *Hide World Clock*, or left-click the tray icon |
 | Quit | Right-click the tray icon → *Exit* |
+
+> In **minimal mode** there is no top bar, so right-clicking the clock window also opens the same menu.
 
 ### Adding a city
 
@@ -105,7 +111,7 @@ Cities added without a search result (time zone picked by hand) work fine but do
 | Cities shown | 1 · 2 · 3 at a time |
 | Temperature | Celsius · Fahrenheit |
 | Close (×) | Minimize to tray · Exit the app |
-| Toggles | 24-hour time · Always on top · Start with Windows |
+| Toggles | 24-hour time · Always on top · Start with Windows · Minimal window |
 
 Settings are stored in:
 

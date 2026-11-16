@@ -54,12 +54,33 @@ namespace WorldClock
             settings = Store.Load();
 
             menu = new ContextMenuStrip();
-            var open = new ToolStripMenuItem("Open World Clock", null, delegate { win.ShowFromTray(); });
+            var open = new ToolStripMenuItem("Open World Clock", null, delegate
+            {
+                if (win.Visible) win.HideToTray(); else win.ShowFromTray();
+            });
             open.Font = new Font(open.Font, FontStyle.Bold);
             menu.Items.Add(open);
-            menu.Items.Add("Settings…", null, delegate { OpenSettings(); });
             menu.Items.Add(new ToolStripSeparator());
+            var top = new ToolStripMenuItem("Always on top", null, delegate { Toggle(s => s.AlwaysOnTop = !s.AlwaysOnTop); });
+            var minimal = new ToolStripMenuItem("Minimal window (no top bar)", null, delegate { Toggle(s => s.Minimal = !s.Minimal); });
+            var startup = new ToolStripMenuItem("Start with Windows", null, delegate
+            {
+                try { Store.StartsWithWindows = !Store.StartsWithWindows; }
+                catch (Exception ex) { MessageBox.Show("Couldn't change the startup setting:\n" + ex.Message, "World Clock"); }
+            });
+            menu.Items.Add(top);
+            menu.Items.Add(minimal);
+            menu.Items.Add(startup);
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Settings…", null, delegate { OpenSettings(); });
             menu.Items.Add("Exit", null, delegate { ExitApp(); });
+            menu.Opening += delegate
+            {
+                open.Text = win.Visible ? "Hide World Clock" : "Open World Clock";
+                top.Checked = win.Settings.AlwaysOnTop;
+                minimal.Checked = win.Settings.Minimal;
+                startup.Checked = Store.StartsWithWindows;
+            };
 
             win = new MainWindow(settings, this);
             IntPtr force = win.Handle;   // create the handle so BeginInvoke works while hidden
@@ -94,6 +115,16 @@ namespace WorldClock
         }
 
         public void ShowMenu(Control owner, Point p) { menu.Show(owner, p); }
+
+        // quick toggles from the tray menu
+        void Toggle(Action<AppSettings> change)
+        {
+            AppSettings s = win.Settings;
+            change(s);
+            Store.Save(s);
+            win.ApplySettings(s);
+            if (!win.Visible) win.ShowFromTray();
+        }
 
         public void OpenSettings()
         {

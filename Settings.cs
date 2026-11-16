@@ -55,6 +55,7 @@ namespace WorldClock
         public bool Use24h { get; set; }
         public bool CloseToTray { get; set; }   // what the X button does
         public bool AlwaysOnTop { get; set; }
+        public bool Minimal { get; set; }       // no top bar: control everything from the tray menu
         public bool HasPos { get; set; }
         public int WinX { get; set; }
         public int WinY { get; set; }

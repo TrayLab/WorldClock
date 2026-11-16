@@ -26,7 +26,7 @@ namespace WorldClock
         public AppSettings Result { get; private set; }
 
         ComboBox cbTheme, cbStyle, cbSize, cbVisible, cbUnit, cbClose, cbZone;
-        CheckBox chk24, chkTop, chkStartup;
+        CheckBox chk24, chkTop, chkStartup, chkMinimal;
         ListBox lbCities, lbResults;
         TextBox tbSearch, tbName;
         Button btnUp, btnDown, btnRemove, btnSearch, btnAdd, btnUpdate, btnSave, btnCancel;
@@ -65,8 +65,9 @@ namespace WorldClock
             Muted("Close (\u00D7)", 290, 116);
             cbClose = Combo(394, 112, 150, "Minimize to tray", "Exit the app");
             chk24 = Check("24-hour time", 16, 156);
-            chkTop = Check("Always on top", 170, 156);
-            chkStartup = Check("Start with Windows", 330, 156);
+            chkTop = Check("Always on top", 136, 156);
+            chkStartup = Check("Start with Windows", 266, 156);
+            chkMinimal = Check("Minimal window", 420, 156);
 
             cbTheme.SelectedIndex = Math.Max(0, Array.IndexOf(ThemeKeys, work.Theme));
             cbStyle.SelectedIndex = work.Digital ? 1 : 0;
@@ -76,6 +77,7 @@ namespace WorldClock
             cbClose.SelectedIndex = work.CloseToTray ? 0 : 1;
             chk24.Checked = work.Use24h;
             chkTop.Checked = work.AlwaysOnTop;
+            chkMinimal.Checked = work.Minimal;
             chkStartup.Checked = Store.StartsWithWindows;
             cbTheme.SelectedIndexChanged += delegate { pal = Palette.For(ThemeKeys[cbTheme.SelectedIndex]); ApplyTheme(); };
 
@@ -431,6 +433,7 @@ namespace WorldClock
             work.CloseToTray = cbClose.SelectedIndex != 1;
             work.Use24h = chk24.Checked;
             work.AlwaysOnTop = chkTop.Checked;
+            work.Minimal = chkMinimal.Checked;
             try { if (Store.StartsWithWindows != chkStartup.Checked) Store.StartsWithWindows = chkStartup.Checked; }
             catch (Exception ex) { MessageBox.Show(this, "Couldn't change the startup setting:\n" + ex.Message, "World Clock"); }
             Result = work;

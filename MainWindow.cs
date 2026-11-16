@@ -28,7 +28,7 @@ namespace WorldClock
         // ------------------------------------------------------------ layout
         struct Metrics { public float W, H, MinCW, R; }
         Metrics m;
-        const float HeaderH = 26, Pad = 8, Gap = 8, GutterW = 18;
+        const float BarH = 26, Pad = 8, Gap = 8, GutterW = 18;
         float gutter, cw, ch, rowX;
         int visible;
         bool Paging { get { return settings.Cities.Count > visible; } }
@@ -138,6 +138,7 @@ namespace WorldClock
             pal = Palette.For(s.Theme);
             BackColor = pal.Bg;
             TopMost = s.AlwaysOnTop;
+            if (ShowInTaskbar == s.Minimal) ShowInTaskbar = !s.Minimal;   // minimal = widget, no taskbar button
             if (animating) { animating = false; DisposeSnaps(); }
             scrolling = false;
             view = 0;
@@ -189,6 +190,7 @@ namespace WorldClock
             btn[BtnMin] = new RectangleF(btn[BtnClose].X - bw, by, bw, bh);
             btn[BtnGear] = new RectangleF(btn[BtnMin].X - bw, by, bw, bh);
             btn[BtnBack] = new RectangleF(4 * S, by, 24 * S, bh);
+            if (settings.Minimal) for (int i = 0; i < 4; i++) btn[i] = RectangleF.Empty;
             arrowL = new RectangleF(Pad * S - 4 * S, HeaderH * S, gutter * S + 2 * S, ch * S);
             arrowR = new RectangleF(Width - (Pad + gutter) * S + 2 * S, HeaderH * S, gutter * S + 2 * S, ch * S);
             if (positioned) ClampToScreen();
@@ -196,6 +198,7 @@ namespace WorldClock
 
         float OX { get { return (Pad + gutter) * S; } }
         float OY { get { return HeaderH * S; } }
+        float HeaderH { get { return settings != null && settings.Minimal ? Pad : BarH; } }
         RectangleF Full { get { return new RectangleF(0, 0, cw * S, ch * S); } }
 
         RectangleF CardRect(int i)
@@ -520,7 +523,7 @@ namespace WorldClock
             bool full = e.ClipRectangle.Contains(ClientRectangle);
             float ox = OX, oy = OY;
 
-            DrawHeader(g);
+            if (!settings.Minimal) DrawHeader(g);
             if (Paging && view == 0 && !animating) DrawArrows(g);
 
             if (full) iconRects.Clear();
@@ -896,6 +899,7 @@ namespace WorldClock
         // ============================================================== mouse
         int HitBtn(Point p)
         {
+            if (settings.Minimal) return -1;
             for (int i = 0; i < 4; i++)
             {
                 if (i == BtnBack && view != 1) continue;
